@@ -42,7 +42,7 @@ cluster_cert_file = "{}/cluster.crt".format(cluster_dir)
 cluster_key_file = "{}/cluster.key".format(cluster_dir)
 
 
-def get_connection_info(master_ip, master_port, token, callback_token=None, cluster_type="etcd"):
+def get_connection_info(master_ip, master_port, token, callback_token=None, cluster_type="etcd", interface_ip=None):
     """
     Contact the master and get all connection information
 
@@ -50,6 +50,7 @@ def get_connection_info(master_ip, master_port, token, callback_token=None, clus
     :param master_port: the master port
     :param token: the token to contact the master with
     :param cluster_type: the type of cluster we want to join, etcd or dqlite
+    :param interface_ip: the source ip address to use
 
     :return: the json response of the master
     """
@@ -64,7 +65,20 @@ def get_connection_info(master_ip, master_port, token, callback_token=None, clus
 
         # TODO: enable ssl verification
         try:
-            connection_info = requests.post(
+            # Create "Session" which will bind to the specified local address
+            # rather than auto-selecting it.
+            session = requests.Session()
+            for prefix in ('http://', 'https://'):
+                session.get_adapter().init_poolmanager(
+                    # those are default values from HTTPAdapter's constructor
+                    connections=requests.adapters.DEFAULT_POOLSIZE,
+                    maxsize=requests.adapters.DEFAULT_POOLSIZE,
+                    # This should be a tuple of (address, port). Port 0 means auto-selection.                    
+                    source_address=(interface_ip, 0),
+                )
+
+
+            connection_info = session.post(
                 "https://{}:{}/{}/join".format(master_ip, master_port, CLUSTER_API_V2),
                 json=req_data,
                 verify=False,
@@ -105,7 +119,15 @@ def get_connection_info(master_ip, master_port, token, callback_token=None, clus
 
 
 def usage():
-    print("Join a cluster: microk8s join <master>:<port>/<token>")
+    print("Join a cluster: microk8s join <master>:<port>/<token> [options]")
+    print("")
+    print("Options:")
+    print(
+        "--interface	the source IP address to be used as HTTP"
+        " connection source address (default: None). Not used during reset"
+        " or removal."
+    )
+        
 
 
 def set_arg(key, value, file):
@@ -856,11 +878,13 @@ def update_dqlite(cluster_cert, cluster_key, voters, host):
     restart_all_services()
 
 
-def join_dqlite(connection_parts):
+def join_dqlite(connection_parts, interface_ip=None):
     """
     Configure node to join a dqlite cluster.
 
     :param connection_parts: connection string parts
+    :param interface_ip: the source ip address
+    
     """
     token = connection_parts[1]
     master_ep = connection_parts[0].split(":")
@@ -868,7 +892,7 @@ def join_dqlite(connection_parts):
     master_port = master_ep[1]
 
     print("Contacting cluster at {}".format(master_ip))
-    info = get_connection_info(master_ip, master_port, token, cluster_type="dqlite")
+    info = get_connection_info(master_ip, master_port, token, cluster_type="dqlite", interface_ip=interface_ip)
 
     hostname_override = info['hostname_override']
 
@@ -903,18 +927,19 @@ def join_dqlite(connection_parts):
     try_initialise_cni_autodetect_for_clustering(master_ip, apply_cni=False)
 
 
-def join_etcd(connection_parts):
+def join_etcd(connection_parts, interface_ip=None):
     """
     Configure node to join an etcd cluster.
 
     :param connection_parts: connection string parts
+    :param interface_ip: the source ip address    
     """
     token = connection_parts[1]
     master_ep = connection_parts[0].split(":")
     master_ip = master_ep[0]
     master_port = master_ep[1]
     callback_token = generate_callback_token()
-    info = get_connection_info(master_ip, master_port, token, callback_token=callback_token)
+    info = get_connection_info(master_ip, master_port, token, callback_token=callback_token, interface_ip=interface_ip)
     store_base_kubelet_args(info["kubelet_args"])
     hostname_override = None
     if 'hostname_override' in info:
@@ -928,19 +953,22 @@ def join_etcd(connection_parts):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt.gnu_getopt(sys.argv[1:], "hf", ["help", "force"])
+        opts, args = getopt.gnu_getopt(sys.argv[1:], "hfi:v", ["help", "force", "interface="])
     except getopt.GetoptError as err:
         print(err)  # will print something like "option -a not recognized"
         usage()
         sys.exit(2)
 
     force = False
+    source_address = None
     for o, a in opts:
         if o in ("-h", "--help"):
             usage()
             sys.exit(1)
         elif o in ("-f", "--force"):
             force = True
+        elif o in ("-i", "--interface"):
+            source_address = a
         else:
             print("Unhandled option")
             sys.exit(1)
@@ -964,8 +992,8 @@ if __name__ == "__main__":
     else:
         connection_parts = args[0].split("/")
         if is_node_running_dqlite():
-            join_dqlite(connection_parts)
+            join_dqlite(connection_parts, source_address)
         else:
-            join_etcd(connection_parts)
+            join_etcd(connection_parts, source_address)
 
     sys.exit(0)
