@@ -97,6 +97,7 @@ def get_connection_info(
     cluster_type="etcd",
     verify_peer=False,
     fingerprint=None,
+    interface=None,  
 ):
     """
     Contact the master and get all connection information
@@ -108,13 +109,14 @@ def get_connection_info(
     :param cluster_type: the type of cluster we want to join, etcd or dqlite
     :param verify_peer: flag indicating if we should verify peers certificate
     :param fingerprint: the certificate fingerprint we expect from the peer
+    :param interface: source address to be used for the HTTP connection
 
     :return: the json response of the master
     """
     cluster_agent_port = get_cluster_agent_port()
     try:
-        context = ssl._create_unverified_context()
-        conn = http.client.HTTPSConnection("{}:{}".format(master_ip, master_port), context=context)
+        context = ssl._create_unverified_context()        
+        conn = http.client.HTTPSConnection("{}:{}".format(master_ip, master_port), source_address=(interface, 0), context=context)
         conn.connect()
         if cluster_type == "dqlite":
             req_data = {
@@ -146,6 +148,11 @@ def usage():
     print("Join a cluster: microk8s join <master>:<port>/<token> [options]")
     print("")
     print("Options:")
+    print(
+        "--interface	the source IP address to be used as HTTP"
+        " connection source address (default: None). Not used during reset"
+        " or removal."
+    )
     print(
         "--skip-verify  skip the certificate verification of the node we are"
         " joining to (default: false)."
@@ -905,11 +912,12 @@ def update_dqlite(cluster_cert, cluster_key, voters, host):
     restart_all_services()
 
 
-def join_dqlite(connection_parts, verify=True):
+def join_dqlite(connection_parts, verify=True, interface=None):
     """
     Configure node to join a dqlite cluster.
 
     :param connection_parts: connection string parts
+    :param interface: source address to be used for the HTTP connection
     """
     token = connection_parts[1]
     master_ep = connection_parts[0].split(":")
@@ -929,6 +937,7 @@ def join_dqlite(connection_parts, verify=True):
         cluster_type="dqlite",
         verify_peer=verify,
         fingerprint=fingerprint,
+        interface=interface,
     )
 
     hostname_override = info["hostname_override"]
@@ -964,18 +973,19 @@ def join_dqlite(connection_parts, verify=True):
     try_initialise_cni_autodetect_for_clustering(master_ip, apply_cni=False)
 
 
-def join_etcd(connection_parts, verify=True):
+def join_etcd(connection_parts, verify=True, interface=None):
     """
     Configure node to join an etcd cluster.
 
     :param connection_parts: connection string parts
+    :param interface: source address to be used for the HTTP connection
     """
     token = connection_parts[1]
     master_ep = connection_parts[0].split(":")
     master_ip = master_ep[0]
     master_port = master_ep[1]
     callback_token = generate_callback_token()
-    info = get_connection_info(master_ip, master_port, token, callback_token=callback_token)
+    info = get_connection_info(master_ip, master_port, token, callback_token=callback_token, interface=interface)
     store_base_kubelet_args(info["kubelet_args"])
     hostname_override = None
     if "hostname_override" in info:
@@ -989,7 +999,7 @@ def join_etcd(connection_parts, verify=True):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt.gnu_getopt(sys.argv[1:], "hfs", ["help", "force", "skip-verify"])
+        opts, args = getopt.gnu_getopt(sys.argv[1:], "hfsi:v", ["help", "force", "skip-verify", "interface="])
     except getopt.GetoptError as err:
         print(err)  # will print something like "option -a not recognized"
         usage()
@@ -997,6 +1007,7 @@ if __name__ == "__main__":
 
     force = False
     verify = True
+    interface = None
     for o, a in opts:
         if o in ("-h", "--help"):
             usage()
@@ -1005,6 +1016,8 @@ if __name__ == "__main__":
             force = True
         elif o in ("-s", "--skip-verify"):
             verify = False
+        elif o in ("-i", "--interface"):
+            interface = a
         else:
             print("Unhandled option")
             sys.exit(1)
@@ -1028,8 +1041,8 @@ if __name__ == "__main__":
     else:
         connection_parts = args[0].split("/")
         if is_node_running_dqlite():
-            join_dqlite(connection_parts, verify)
+            join_dqlite(connection_parts, verify, interface)
         else:
-            join_etcd(connection_parts, verify)
+            join_etcd(connection_parts, verify, interface)
 
     sys.exit(0)
